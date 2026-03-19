@@ -1,4 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip as RechartsTooltip, Legend, ResponsiveContainer,
+  BarChart, Bar, Cell,
+} from "recharts";
 
 // ─── Slack Design Tokens ─────────────────────────────────────────────
 const COLORS = {
@@ -1187,43 +1192,721 @@ function ScenarioPlanner({ validationResults, kpi, onGenerate }) {
   );
 }
 
-// ─── Stage 3: Test Design Placeholder ────────────────────────────────
-function TestDesignOutput({ params }) {
+// ─── Stage 3 Statistical Helpers ─────────────────────────────────────
+function pearsonCorrelation(x, y) {
+  const n = Math.min(x.length, y.length);
+  if (n < 2) return 0;
+  const mx = x.slice(0, n).reduce((a, b) => a + b, 0) / n;
+  const my = y.slice(0, n).reduce((a, b) => a + b, 0) / n;
+  let num = 0, dx = 0, dy = 0;
+  for (let i = 0; i < n; i++) {
+    const a = x[i] - mx, b = y[i] - my;
+    num += a * b; dx += a * a; dy += b * b;
+  }
+  if (dx === 0 || dy === 0) return 0;
+  return num / Math.sqrt(dx * dy);
+}
+
+function cosineSimilarity(a, b) {
+  const n = Math.min(a.length, b.length);
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  if (na === 0 || nb === 0) return 0;
+  return dot / Math.sqrt(na * nb);
+}
+
+function shuffleSample(arr, n) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a.slice(0, n);
+}
+
+function buildDMAStats(rows, dateCol, geoCol, metricCol) {
+  const parsed = [];
+  for (const row of rows) {
+    const d = new Date(row[dateCol]);
+    const m = parseFloat(row[metricCol]);
+    const g = row[geoCol];
+    if (!isNaN(d.getTime()) && !isNaN(m) && g) {
+      parsed.push({ date: d, metric: m, geo: g, dow: d.getDay() });
+    }
+  }
+  if (parsed.length === 0) return {};
+  const minTime = parsed.reduce((a, b) => a.date < b.date ? a : b).date.getTime();
+  const dmaMap = {};
+  for (const { date, metric, geo, dow } of parsed) {
+    if (!dmaMap[geo]) dmaMap[geo] = { weeklyTotals: {}, dowTotals: Array(7).fill(0), total: 0 };
+    const wk = Math.floor((date.getTime() - minTime) / (7 * 24 * 3600 * 1000));
+    dmaMap[geo].weeklyTotals[wk] = (dmaMap[geo].weeklyTotals[wk] || 0) + metric;
+    dmaMap[geo].dowTotals[dow] += metric;
+    dmaMap[geo].total += metric;
+  }
+  const allWeeks = new Set();
+  for (const d of Object.values(dmaMap)) Object.keys(d.weeklyTotals).forEach(w => allWeeks.add(Number(w)));
+  const sortedWeeks = Array.from(allWeeks).sort((a, b) => a - b);
+  for (const [geo, d] of Object.entries(dmaMap)) {
+    d.weeks = sortedWeeks.map(w => d.weeklyTotals[w] || 0);
+    d.avgWeekly = d.total / (sortedWeeks.length || 1);
+    d.geo = geo;
+  }
+  return dmaMap;
+}
+
+function assignTiers(dmaStats) {
+  const dmas = Object.keys(dmaStats);
+  const sorted = [...dmas].sort((a, b) => dmaStats[a].total - dmaStats[b].total);
+  const n = sorted.length;
+  const tiers = {};
+  sorted.forEach((dma, i) => { tiers[dma] = Math.min(4, Math.floor(i / n * 4) + 1); });
+  return tiers;
+}
+
+function stratifiedSample(tiers, numDMAs, excludeSet = new Set()) {
+  const tierGroups = { 1: [], 2: [], 3: [], 4: [] };
+  for (const [dma, tier] of Object.entries(tiers)) {
+    if (!excludeSet.has(dma)) tierGroups[tier].push(dma);
+  }
+  const totalAvail = Object.values(tierGroups).reduce((s, g) => s + g.length, 0);
+  if (totalAvail === 0) return [];
+  const result = [];
+  for (let tier = 1; tier <= 4; tier++) {
+    const g = tierGroups[tier];
+    const n = Math.round(numDMAs * g.length / totalAvail);
+    result.push(...shuffleSample(g, n));
+  }
+  // Adjust for rounding
+  const allAvail = Object.values(tierGroups).flat().filter(d => !result.includes(d));
+  let idx = 0;
+  while (result.length < numDMAs && idx < allAvail.length) result.push(allAvail[idx++]);
+  return result.slice(0, numDMAs);
+}
+
+function aggregateGroupSeries(dmaStats, dmaList) {
+  if (dmaList.length === 0) return [];
+  const maxLen = Math.max(...dmaList.map(d => dmaStats[d]?.weeks?.length || 0));
+  const series = Array(maxLen).fill(0);
+  for (const dma of dmaList) (dmaStats[dma]?.weeks || []).forEach((v, i) => { series[i] += v; });
+  return series;
+}
+
+function scoreSim(dmaStats, testDMAs, controlDMAs) {
+  const testSeries = aggregateGroupSeries(dmaStats, testDMAs);
+  const ctrlSeries = aggregateGroupSeries(dmaStats, controlDMAs);
+  const corr = pearsonCorrelation(testSeries, ctrlSeries);
+  const testTotal = testDMAs.reduce((s, d) => s + (dmaStats[d]?.total || 0), 0);
+  const ctrlTotal = controlDMAs.reduce((s, d) => s + (dmaStats[d]?.total || 0), 0);
+  const maxTotal = Math.max(testTotal, ctrlTotal, 1);
+  const volSim = 1 - Math.abs(testTotal - ctrlTotal) / maxTotal;
+  const testDow = Array(7).fill(0), ctrlDow = Array(7).fill(0);
+  for (const d of testDMAs) (dmaStats[d]?.dowTotals || []).forEach((v, i) => testDow[i] += v);
+  for (const d of controlDMAs) (dmaStats[d]?.dowTotals || []).forEach((v, i) => ctrlDow[i] += v);
+  const dowSim = cosineSimilarity(testDow, ctrlDow);
+  const composite = 0.5 * corr + 0.2 * volSim + 0.3 * dowSim;
+  return { corr, volSim, dowSim, composite };
+}
+
+function runMonteCarloChunk(dmaStats, testDMAs, tiers, controlRatioNum, chunkSize, best) {
+  const testSet = new Set(testDMAs);
+  const tierPools = { 1: [], 2: [], 3: [], 4: [] };
+  for (const [dma, tier] of Object.entries(tiers)) {
+    if (!testSet.has(dma)) tierPools[tier].push(dma);
+  }
+  const testTierCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  for (const d of testDMAs) testTierCounts[tiers[d] || 1]++;
+  const totalControlNeeded = testDMAs.length * controlRatioNum;
+
+  for (let i = 0; i < chunkSize; i++) {
+    const controlSample = [];
+    let deficit = 0;
+    for (let tier = 1; tier <= 4; tier++) {
+      const pool = tierPools[tier];
+      const raw = testTierCounts[tier] * controlRatioNum + deficit;
+      const take = Math.min(Math.round(raw), pool.length);
+      deficit = raw - take;
+      if (take > 0) controlSample.push(...shuffleSample(pool, take));
+    }
+    if (controlSample.length < Math.max(1, Math.ceil(totalControlNeeded * 0.7))) continue;
+    const scores = scoreSim(dmaStats, testDMAs, controlSample);
+    if (scores.corr < 0.85) continue;
+    if (!best || scores.composite > best.composite) {
+      best = { controlDMAs: controlSample, ...scores };
+    }
+  }
+  return best;
+}
+
+// ─── Stage 3: Test Design Output ─────────────────────────────────────
+function QualityGate({ label, value, pass, tooltip }) {
+  const color = pass ? COLORS.green : COLORS.red;
+  const bg = pass ? COLORS.lightGreenBg : COLORS.lightRedBg;
   return (
-    <div style={{ textAlign: "center", padding: "60px 24px" }}>
-      <div style={{ fontSize: 36, marginBottom: 16 }}>🚀</div>
-      <div style={{ fontSize: 20, fontWeight: 700, color: COLORS.darkGray, marginBottom: 8 }}>
-        Test Design Generation
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      padding: "10px 14px", borderRadius: 6, border: `1px solid ${pass ? "#B8E0CC" : "#F0B8CC"}`,
+      backgroundColor: bg,
+    }}>
+      <div style={{ display: "flex", alignItems: "center" }}>
+        <span style={{ fontSize: 14, marginRight: 8 }}>{pass ? "✓" : "✗"}</span>
+        <span style={{ fontSize: 13, color: COLORS.darkGray }}>
+          <Tooltip content={tooltip}>{label}</Tooltip>
+        </span>
       </div>
-      <div style={{ fontSize: 14, color: COLORS.mediumGray, maxWidth: 500, margin: "0 auto", lineHeight: 1.6 }}>
-        This stage will run <Term tooltip={TOOLTIPS.monteCarlo}>Monte Carlo matching</Term> across 10,000 simulations to find the optimal control group, then produce DMA assignments, match quality reports, and time series charts.
+      <span style={{ fontSize: 14, fontWeight: 700, color, fontFamily: "monospace" }}>
+        {typeof value === "number" ? value.toFixed(3) : value}
+      </span>
+    </div>
+  );
+}
+
+function TestDesignOutput({ params, rows, mapping, kpi }) {
+  const [phase, setPhase] = useState("init");
+  const [dmaStats, setDmaStats] = useState(null);
+  const [tiers, setTiers] = useState(null);
+  const [testDMAs, setTestDMAs] = useState([]);
+  const [manualExcludes, setManualExcludes] = useState(new Set());
+  const [manualIncludes, setManualIncludes] = useState(new Set());
+  const [progress, setProgress] = useState(0);
+  const [result, setResult] = useState(null);
+  const [tableSort, setTableSort] = useState({ col: "group", dir: "asc" });
+  const [showAllDMAs, setShowAllDMAs] = useState(false);
+  const cancelRef = useRef(false);
+
+  const controlRatioNum = params.controlRatio === "2:1" ? 2 : 1;
+
+  useEffect(() => {
+    if (!rows || !mapping?.dateCol) return;
+    const stats = buildDMAStats(rows, mapping.dateCol, mapping.geoCol, mapping.metricCol);
+    const tiered = assignTiers(stats);
+    setDmaStats(stats);
+    setTiers(tiered);
+    setTestDMAs(stratifiedSample(tiered, params.numDMAs));
+    setPhase("setup");
+  }, []);
+
+  const resample = () => {
+    if (!tiers) return;
+    const excl = new Set([...manualExcludes]);
+    const incl = [...manualIncludes].filter(d => !excl.has(d));
+    const needed = Math.max(0, params.numDMAs - incl.length);
+    const auto = stratifiedSample(tiers, needed, new Set([...excl, ...incl]));
+    setTestDMAs([...incl, ...auto].slice(0, params.numDMAs));
+  };
+
+  const toggleExclude = (dma) => {
+    setManualExcludes(prev => {
+      const next = new Set(prev);
+      if (next.has(dma)) next.delete(dma); else next.add(dma);
+      return next;
+    });
+    setManualIncludes(prev => { const n = new Set(prev); n.delete(dma); return n; });
+  };
+
+  const toggleInclude = (dma) => {
+    setManualIncludes(prev => {
+      const next = new Set(prev);
+      if (next.has(dma)) next.delete(dma); else next.add(dma);
+      return next;
+    });
+    setManualExcludes(prev => { const n = new Set(prev); n.delete(dma); return n; });
+  };
+
+  const startMatching = () => {
+    cancelRef.current = false;
+    setPhase("running");
+    setProgress(0);
+    const TOTAL = 10000, CHUNK = 250;
+    let done = 0, best = null;
+    const tick = () => {
+      if (cancelRef.current) return;
+      best = runMonteCarloChunk(dmaStats, testDMAs, tiers, controlRatioNum, CHUNK, best);
+      done += CHUNK;
+      setProgress(Math.round((done / TOTAL) * 100));
+      if (done < TOTAL) { setTimeout(tick, 0); }
+      else { setResult(best); setPhase("done"); }
+    };
+    setTimeout(tick, 0);
+  };
+
+  // ── INIT ────────────────────────────────────────────────────────────
+  if (phase === "init") {
+    return (
+      <div style={{ textAlign: "center", padding: 48, color: COLORS.mediumGray }}>
+        <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
+        <div>Loading data…</div>
       </div>
-      <div style={{
-        marginTop: 24, padding: "16px 20px", borderRadius: 8, border: `1px solid ${COLORS.lightGray}`,
-        backgroundColor: COLORS.offWhite, maxWidth: 400, margin: "24px auto 0", textAlign: "left",
-      }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.mediumGray, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Design Parameters</div>
-        {[
-          ["Test Design", params.testCells === 3 ? `3-Cell Dose-Response (${params.spendMultiplier}x)` : "2-Cell Standard"],
-          ["Budget", `$${params.budget.toLocaleString()}`],
-          ["Test DMAs", params.numDMAs],
-          ["Duration", `${params.weeks} weeks`],
-          ["Target MDE", `${params.mde}%`],
-          ["Significance (α)", params.alpha],
-          ["Power target", `${params.powerTarget * 100}%`],
-          ["Control:Test", params.controlRatio],
-        ].map(([label, value], i) => (
-          <div key={i} style={{
-            display: "flex", justifyContent: "space-between", padding: "6px 0",
-            borderBottom: i < 7 ? `1px solid ${COLORS.lightGray}` : "none", fontSize: 13,
-          }}>
-            <span style={{ color: COLORS.mediumGray }}>{label}</span>
-            <span style={{ fontWeight: 700, color: COLORS.darkGray }}>{value}</span>
+    );
+  }
+
+  // ── SETUP ───────────────────────────────────────────────────────────
+  if (phase === "setup") {
+    const allDMAs = dmaStats ? Object.keys(dmaStats) : [];
+    const tierCounts = allDMAs.reduce((acc, d) => {
+      const t = tiers[d];
+      acc[t] = (acc[t] || 0) + 1;
+      return acc;
+    }, {});
+    const testTierDist = testDMAs.reduce((acc, d) => {
+      const t = tiers[d];
+      acc[t] = (acc[t] || 0) + 1;
+      return acc;
+    }, {});
+    const displayDMAs = showAllDMAs ? allDMAs : allDMAs.slice(0, 20);
+
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+        {/* Tier summary */}
+        <div style={{ padding: "20px 24px", borderRadius: 8, border: `1px solid ${COLORS.lightGray}`, backgroundColor: COLORS.white }}>
+          <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
+            <span style={{ fontSize: 15, fontWeight: 700, color: COLORS.darkGray }}>Tier Assignment</span>
+            <Tooltip content={TOOLTIPS.tier}><span /></Tooltip>
           </div>
-        ))}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+            {[1, 2, 3, 4].map(t => (
+              <div key={t} style={{
+                padding: "12px", borderRadius: 6, textAlign: "center",
+                backgroundColor: COLORS.offWhite, border: `1px solid ${COLORS.lightGray}`,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.mediumGray, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>
+                  Tier {t}
+                </div>
+                <div style={{ fontSize: 22, fontWeight: 900, color: COLORS.aubergine }}>{tierCounts[t] || 0}</div>
+                <div style={{ fontSize: 11, color: COLORS.mediumGray }}>DMAs</div>
+                <div style={{ fontSize: 11, color: COLORS.blue, marginTop: 4 }}>{testTierDist[t] || 0} selected as test</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop: 12, fontSize: 12, color: COLORS.mediumGray, lineHeight: 1.5 }}>
+            {allDMAs.length} DMAs available · {testDMAs.length} selected as test · {testDMAs.length * controlRatioNum} control slots needed ({params.controlRatio} ratio)
+          </div>
+        </div>
+
+        {/* DMA selection */}
+        <div style={{ padding: "20px 24px", borderRadius: 8, border: `1px solid ${COLORS.lightGray}`, backgroundColor: COLORS.white }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+            <div style={{ display: "flex", alignItems: "center" }}>
+              <span style={{ fontSize: 15, fontWeight: 700, color: COLORS.darkGray }}>Test DMA Selection</span>
+              <Tooltip content="Use the toggles below to manually force specific DMAs in or out of the test group. Click 'Resample' to re-randomize the remaining slots using stratified sampling."><span /></Tooltip>
+            </div>
+            <button onClick={resample} style={{
+              padding: "6px 14px", borderRadius: 4, border: `1px solid ${COLORS.aubergine}`,
+              backgroundColor: "#F6EDF6", color: COLORS.aubergine, fontSize: 12, fontWeight: 700,
+              cursor: "pointer", fontFamily: "'Lato', sans-serif",
+            }}>↺ Resample</button>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ backgroundColor: COLORS.offWhite }}>
+                  {["DMA", "Tier", "Avg Weekly", "Status", "Force In", "Force Out"].map(h => (
+                    <th key={h} style={{
+                      padding: "8px 12px", textAlign: "left", borderBottom: `1px solid ${COLORS.lightGray}`,
+                      fontSize: 11, fontWeight: 700, color: COLORS.mediumGray, textTransform: "uppercase", letterSpacing: "0.05em",
+                    }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {displayDMAs.map((dma, i) => {
+                  const isTest = testDMAs.includes(dma);
+                  const isIncl = manualIncludes.has(dma);
+                  const isExcl = manualExcludes.has(dma);
+                  return (
+                    <tr key={dma} style={{ backgroundColor: i % 2 === 0 ? COLORS.white : COLORS.offWhite }}>
+                      <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.lightGray}`, color: COLORS.darkGray, fontFamily: "monospace", fontSize: 12 }}>{dma}</td>
+                      <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.lightGray}` }}>
+                        <span style={{
+                          fontSize: 11, fontWeight: 700, padding: "2px 7px", borderRadius: 4,
+                          backgroundColor: ["", "#E8F5FA", "#E8F8F0", "#FDF4E3", "#FDE8EF"][tiers[dma]],
+                          color: [COLORS.blue, COLORS.blue, COLORS.green, COLORS.yellow, COLORS.red][tiers[dma]],
+                        }}>T{tiers[dma]}</span>
+                      </td>
+                      <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.lightGray}`, fontFamily: "monospace", fontSize: 12, color: COLORS.darkGray }}>
+                        {Math.round(dmaStats[dma]?.avgWeekly || 0).toLocaleString()}
+                      </td>
+                      <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.lightGray}` }}>
+                        <span style={{
+                          fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
+                          backgroundColor: isExcl ? COLORS.lightRedBg : isTest ? COLORS.lightGreenBg : COLORS.offWhite,
+                          color: isExcl ? COLORS.red : isTest ? COLORS.green : COLORS.mediumGray,
+                        }}>
+                          {isExcl ? "Excluded" : isTest ? "Test" : "Control pool"}
+                        </span>
+                      </td>
+                      <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.lightGray}` }}>
+                        <input type="checkbox" checked={isIncl} onChange={() => toggleInclude(dma)}
+                          style={{ accentColor: COLORS.green, cursor: "pointer", width: 16, height: 16 }} />
+                      </td>
+                      <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.lightGray}` }}>
+                        <input type="checkbox" checked={isExcl} onChange={() => toggleExclude(dma)}
+                          style={{ accentColor: COLORS.red, cursor: "pointer", width: 16, height: 16 }} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {allDMAs.length > 20 && (
+            <button onClick={() => setShowAllDMAs(!showAllDMAs)} style={{
+              marginTop: 8, background: "none", border: "none", cursor: "pointer",
+              fontSize: 12, color: COLORS.blue, fontFamily: "'Lato', sans-serif", padding: "4px 0",
+            }}>
+              {showAllDMAs ? "Show fewer" : `Show all ${allDMAs.length} DMAs`}
+            </button>
+          )}
+        </div>
+
+        <button onClick={startMatching} style={{
+          padding: "13px 28px", borderRadius: 4, border: "none", cursor: "pointer",
+          backgroundColor: COLORS.aubergine, color: COLORS.white, fontSize: 15, fontWeight: 700,
+          fontFamily: "'Lato', sans-serif", alignSelf: "flex-start",
+        }}
+          onMouseEnter={e => e.target.style.backgroundColor = COLORS.aubergineDark}
+          onMouseLeave={e => e.target.style.backgroundColor = COLORS.aubergine}
+        >
+          Run Control Matching (10,000 sims) →
+        </button>
       </div>
-      <div style={{ marginTop: 24, fontSize: 13, color: COLORS.mediumGray }}>
-        Stage 3 matching engine coming in the next iteration.
+    );
+  }
+
+  // ── RUNNING ─────────────────────────────────────────────────────────
+  if (phase === "running") {
+    return (
+      <div style={{ textAlign: "center", padding: "60px 24px" }}>
+        <div style={{ fontSize: 32, marginBottom: 16 }}>🎲</div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: COLORS.darkGray, marginBottom: 4 }}>
+          Running Monte Carlo Matching
+        </div>
+        <Tooltip content={TOOLTIPS.monteCarlo}>
+          <div style={{ fontSize: 13, color: COLORS.mediumGray, marginBottom: 32 }}>
+            Testing 10,000 random control group combinations…
+          </div>
+        </Tooltip>
+        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: COLORS.mediumGray, marginBottom: 6 }}>
+            <span>Progress</span><span>{progress}%</span>
+          </div>
+          <div style={{ height: 10, borderRadius: 5, backgroundColor: COLORS.lightGray, overflow: "hidden" }}>
+            <div style={{
+              height: "100%", borderRadius: 5, backgroundColor: COLORS.aubergine,
+              width: `${progress}%`, transition: "width 0.1s ease",
+            }} />
+          </div>
+          <div style={{ marginTop: 16, fontSize: 12, color: COLORS.mediumGray }}>
+            {Math.round(progress * 100)} / 10,000 simulations complete
+          </div>
+        </div>
+        <button onClick={() => { cancelRef.current = true; setPhase("setup"); }} style={{
+          marginTop: 32, padding: "8px 18px", borderRadius: 4, border: `1px solid ${COLORS.lightGray}`,
+          backgroundColor: COLORS.white, color: COLORS.darkGray, fontSize: 13, cursor: "pointer",
+          fontFamily: "'Lato', sans-serif",
+        }}>Cancel</button>
+      </div>
+    );
+  }
+
+  // ── DONE ────────────────────────────────────────────────────────────
+  if (phase !== "done" || !result) return null;
+
+  const { controlDMAs, corr, volSim, dowSim, composite } = result;
+
+  // Assign 3-cell groups if needed
+  const half = Math.floor(testDMAs.length / 2);
+  const lowSpendDMAs = params.testCells === 3 ? testDMAs.slice(0, half) : testDMAs;
+  const highSpendDMAs = params.testCells === 3 ? testDMAs.slice(half) : [];
+
+  // Build DMA assignment table rows
+  const assignmentRows = [
+    ...controlDMAs.map(d => ({ dma: d, group: "Control", tier: tiers[d], avgWeekly: dmaStats[d]?.avgWeekly || 0, spend: 0 })),
+    ...(params.testCells === 3
+      ? [
+        ...lowSpendDMAs.map(d => ({ dma: d, group: "Low Spend", tier: tiers[d], avgWeekly: dmaStats[d]?.avgWeekly || 0, spend: params.budget / ((lowSpendDMAs.length + highSpendDMAs.length * params.spendMultiplier) * params.weeks) })),
+        ...highSpendDMAs.map(d => ({ dma: d, group: "High Spend", tier: tiers[d], avgWeekly: dmaStats[d]?.avgWeekly || 0, spend: (params.budget / ((lowSpendDMAs.length + highSpendDMAs.length * params.spendMultiplier) * params.weeks)) * params.spendMultiplier })),
+      ]
+      : testDMAs.map(d => ({ dma: d, group: "Test", tier: tiers[d], avgWeekly: dmaStats[d]?.avgWeekly || 0, spend: params.budget / (testDMAs.length * params.weeks) }))
+    ),
+  ];
+
+  const sortCol = tableSort.col, sortDir = tableSort.dir;
+  const sortedRows = [...assignmentRows].sort((a, b) => {
+    const av = a[sortCol], bv = b[sortCol];
+    const res = typeof av === "number" ? av - bv : String(av).localeCompare(String(bv));
+    return sortDir === "asc" ? res : -res;
+  });
+
+  const toggleSort = (col) => setTableSort(prev =>
+    prev.col === col ? { col, dir: prev.dir === "asc" ? "desc" : "asc" } : { col, dir: "asc" }
+  );
+
+  // Time series chart data
+  const testSeries = aggregateGroupSeries(dmaStats, testDMAs);
+  const ctrlSeries = aggregateGroupSeries(dmaStats, controlDMAs);
+  const numWeeks = Math.max(testSeries.length, ctrlSeries.length);
+  const rawChartData = Array.from({ length: numWeeks }, (_, i) => ({
+    week: `W${i + 1}`,
+    test: Math.round(testSeries[i] || 0),
+    control: Math.round(ctrlSeries[i] || 0),
+  }));
+  const base0test = testSeries[0] || 1, base0ctrl = ctrlSeries[0] || 1;
+  const indexedChartData = rawChartData.map(d => ({
+    week: d.week,
+    test: Math.round((d.test / base0test) * 100),
+    control: Math.round((d.control / base0ctrl) * 100),
+  }));
+
+  // Tier distribution
+  const testTierDist = testDMAs.reduce((a, d) => { a[tiers[d]] = (a[tiers[d]] || 0) + 1; return a; }, {});
+  const ctrlTierDist = controlDMAs.reduce((a, d) => { a[tiers[d]] = (a[tiers[d]] || 0) + 1; return a; }, {});
+  const tierChartData = [1, 2, 3, 4].map(t => ({
+    tier: `T${t}`, test: testTierDist[t] || 0, control: ctrlTierDist[t] || 0,
+  }));
+
+  // Quality gates
+  const gates = [
+    { label: "Pearson Correlation ≥ 0.85", value: corr, pass: corr >= 0.85, tooltip: TOOLTIPS.correlation },
+    { label: "Volume Difference ≤ 15%", value: `${((1 - volSim) * 100).toFixed(1)}%`, pass: volSim >= 0.85, tooltip: TOOLTIPS.volumeSimilarity },
+    { label: "DOW Similarity ≥ 0.90", value: dowSim, pass: dowSim >= 0.90, tooltip: TOOLTIPS.dowSimilarity },
+    { label: "Composite Score ≥ 0.85", value: composite, pass: composite >= 0.85, tooltip: TOOLTIPS.compositeScore },
+  ];
+  const allPass = gates.every(g => g.pass);
+  const failedGates = gates.filter(g => !g.pass);
+
+  // CSV export
+  const exportCSV = () => {
+    const header = ["DMA", "Group", "Tier", "Avg Weekly Metric", "Weekly Spend"].join(",");
+    const rows = sortedRows.map(r =>
+      [r.dma, r.group, r.tier, Math.round(r.avgWeekly), Math.round(r.spend)].join(",")
+    );
+    const blob = new Blob([[header, ...rows].join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "geo-lift-design.csv"; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Slack Canvas markdown
+  const copyMarkdown = () => {
+    const lines = [
+      `# Geo-Lift Test Design`,
+      `**KPI:** ${kpi === "traffic" ? "Organic + Direct Traffic" : "Team Creates"} | **Design:** ${params.testCells === 3 ? `3-Cell Dose-Response (${params.spendMultiplier}x)` : "2-Cell Standard"}`,
+      `**Budget:** $${params.budget.toLocaleString()} | **Duration:** ${params.weeks} weeks | **MDE:** ${params.mde}% | **α:** ${params.alpha}`,
+      ``,
+      `## Match Quality`,
+      `| Metric | Score | Status |`,
+      `|---|---|---|`,
+      `| Correlation | ${corr.toFixed(3)} | ${corr >= 0.85 ? "✅" : "❌"} |`,
+      `| Volume Similarity | ${volSim.toFixed(3)} | ${volSim >= 0.85 ? "✅" : "❌"} |`,
+      `| DOW Similarity | ${dowSim.toFixed(3)} | ${dowSim >= 0.90 ? "✅" : "❌"} |`,
+      `| Composite | ${composite.toFixed(3)} | ${composite >= 0.85 ? "✅" : "❌"} |`,
+      ``,
+      `## DMA Assignments`,
+      `| DMA | Group | Tier | Avg Weekly | Weekly Spend |`,
+      `|---|---|---|---|---|`,
+      ...sortedRows.map(r => `| ${r.dma} | ${r.group} | T${r.tier} | ${Math.round(r.avgWeekly).toLocaleString()} | $${Math.round(r.spend).toLocaleString()} |`),
+    ];
+    navigator.clipboard.writeText(lines.join("\n"));
+  };
+
+  const cardStyle = { padding: "20px 24px", borderRadius: 8, border: `1px solid ${COLORS.lightGray}`, backgroundColor: COLORS.white };
+  const sectionLabel = { fontSize: 15, fontWeight: 700, color: COLORS.darkGray, marginBottom: 14 };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      {/* Re-run button */}
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <button onClick={() => { setResult(null); setPhase("setup"); }} style={{
+          padding: "7px 16px", borderRadius: 4, border: `1px solid ${COLORS.lightGray}`,
+          backgroundColor: COLORS.white, color: COLORS.darkGray, fontSize: 13, cursor: "pointer",
+          fontFamily: "'Lato', sans-serif",
+        }}>← Edit DMA Selection</button>
+      </div>
+
+      {/* A: Design Summary */}
+      <div style={cardStyle}>
+        <div style={sectionLabel}>Design Summary</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+          {[
+            { label: "KPI", value: kpi === "traffic" ? "Organic + Direct Traffic" : "Team Creates" },
+            { label: "Test Design", value: params.testCells === 3 ? `3-Cell (${params.spendMultiplier}x)` : "2-Cell Standard" },
+            { label: "Duration", value: `${params.weeks} weeks` },
+            { label: "Total Budget", value: `$${params.budget.toLocaleString()}` },
+            { label: "Test DMAs", value: testDMAs.length },
+            { label: "Control DMAs", value: controlDMAs.length },
+            { label: "MDE Target", value: `${params.mde}%` },
+            { label: "Significance (α)", value: params.alpha },
+          ].map(({ label, value }) => (
+            <div key={label} style={{
+              padding: "12px 14px", borderRadius: 6, backgroundColor: COLORS.offWhite,
+              border: `1px solid ${COLORS.lightGray}`,
+            }}>
+              <div style={{ fontSize: 11, color: COLORS.mediumGray, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>{label}</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.aubergine }}>{value}</div>
+            </div>
+          ))}
+        </div>
+        {params.testCells === 3 && (
+          <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            {[
+              { label: "Control DMAs", count: controlDMAs.length, spend: "$0/wk", color: COLORS.mediumGray, bg: COLORS.offWhite },
+              { label: "Low Spend DMAs", count: lowSpendDMAs.length, spend: `$${Math.round(params.budget / ((lowSpendDMAs.length + highSpendDMAs.length * params.spendMultiplier) * params.weeks)).toLocaleString()}/wk`, color: COLORS.aubergine, bg: "#F6EDF6" },
+              { label: "High Spend DMAs", count: highSpendDMAs.length, spend: `$${Math.round((params.budget / ((lowSpendDMAs.length + highSpendDMAs.length * params.spendMultiplier) * params.weeks)) * params.spendMultiplier).toLocaleString()}/wk`, color: COLORS.aubergineDark, bg: "#E8D5F5" },
+            ].map(c => (
+              <div key={c.label} style={{ padding: "10px 14px", borderRadius: 6, backgroundColor: c.bg, border: `1px solid ${COLORS.lightGray}`, textAlign: "center" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: c.color, textTransform: "uppercase", letterSpacing: "0.05em" }}>{c.label}</div>
+                <div style={{ fontSize: 22, fontWeight: 900, color: c.color, margin: "4px 0" }}>{c.count}</div>
+                <div style={{ fontSize: 12, color: c.color }}>{c.spend}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* E: Export (put near top for discoverability) */}
+      <div style={{ display: "flex", gap: 10 }}>
+        <button onClick={exportCSV} style={{
+          padding: "8px 18px", borderRadius: 4, border: `1px solid ${COLORS.lightGray}`,
+          backgroundColor: COLORS.white, color: COLORS.darkGray, fontSize: 13, fontWeight: 700,
+          cursor: "pointer", fontFamily: "'Lato', sans-serif",
+        }}>⬇ Download CSV</button>
+        <button onClick={copyMarkdown} style={{
+          padding: "8px 18px", borderRadius: 4, border: `1px solid ${COLORS.lightGray}`,
+          backgroundColor: COLORS.white, color: COLORS.darkGray, fontSize: 13, fontWeight: 700,
+          cursor: "pointer", fontFamily: "'Lato', sans-serif",
+        }}>📋 Copy for Slack Canvas</button>
+      </div>
+
+      {/* C: Match Quality */}
+      <div style={cardStyle}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
+          <span style={sectionLabel}>Match Quality Report</span>
+          <Tooltip content={TOOLTIPS.compositeScore}><span /></Tooltip>
+        </div>
+        {!allPass && (
+          <div style={{
+            marginBottom: 14, padding: "12px 16px", borderRadius: 8,
+            backgroundColor: COLORS.lightYellowBg, border: `1px solid #F0DFB8`, fontSize: 13, color: COLORS.darkGray,
+          }}>
+            <strong>⚠ {failedGates.length} quality gate{failedGates.length > 1 ? "s" : ""} failed.</strong>{" "}
+            {failedGates.map(g => g.label.split("≥")[0].split("≤")[0].trim()).join(", ")}{" "}
+            {corr < 0.85 && " — try increasing the DMA pool or re-running with a different random seed."}
+            {volSim < 0.85 && " — consider adjusting the control:test ratio or excluding outlier DMAs."}
+            {dowSim < 0.90 && " — DOW mismatch may indicate mixed market types; review tier composition."}
+          </div>
+        )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+          {gates.map(g => <QualityGate key={g.label} {...g} />)}
+        </div>
+        {/* Tier distribution chart */}
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: COLORS.darkGray }}>Tier Distribution</span>
+          <Tooltip content={TOOLTIPS.tier}><span /></Tooltip>
+        </div>
+        <ResponsiveContainer width="100%" height={160}>
+          <BarChart data={tierChartData} barCategoryGap="30%">
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.lightGray} vertical={false} />
+            <XAxis dataKey="tier" tick={{ fontSize: 12, fill: COLORS.mediumGray, fontFamily: "Lato" }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 11, fill: COLORS.mediumGray, fontFamily: "Lato" }} axisLine={false} tickLine={false} />
+            <RechartsTooltip contentStyle={{ fontSize: 12, fontFamily: "Lato", border: `1px solid ${COLORS.lightGray}`, borderRadius: 6 }} />
+            <Legend wrapperStyle={{ fontSize: 12, fontFamily: "Lato" }} />
+            <Bar dataKey="test" name="Test" fill={COLORS.aubergine} radius={[3, 3, 0, 0]} />
+            <Bar dataKey="control" name="Control" fill={COLORS.blue} radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* D: Time Series Charts */}
+      <div style={cardStyle}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
+          <span style={sectionLabel}>Pre-Period Time Series</span>
+          <Tooltip content={TOOLTIPS.preTimeSeries}><span /></Tooltip>
+        </div>
+        <div style={{ fontSize: 12, color: COLORS.mediumGray, marginBottom: 14 }}>Raw weekly metric — test group vs control group</div>
+        <ResponsiveContainer width="100%" height={200}>
+          <LineChart data={rawChartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.lightGray} />
+            <XAxis dataKey="week" tick={{ fontSize: 11, fill: COLORS.mediumGray, fontFamily: "Lato" }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 11, fill: COLORS.mediumGray, fontFamily: "Lato" }} axisLine={false} tickLine={false} width={60}
+              tickFormatter={v => v >= 1000 ? `${(v / 1000).toFixed(0)}K` : v} />
+            <RechartsTooltip contentStyle={{ fontSize: 12, fontFamily: "Lato", border: `1px solid ${COLORS.lightGray}`, borderRadius: 6 }} />
+            <Legend wrapperStyle={{ fontSize: 12, fontFamily: "Lato" }} />
+            <Line type="monotone" dataKey="test" name="Test" stroke={COLORS.aubergine} strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="control" name="Control" stroke={COLORS.blue} strokeWidth={2} dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
+        <div style={{ marginTop: 24, display: "flex", alignItems: "center", marginBottom: 4 }}>
+          <span style={{ fontSize: 14, fontWeight: 700, color: COLORS.darkGray }}>Indexed to Week 1 = 100</span>
+          <Tooltip content={TOOLTIPS.indexedTimeSeries}><span /></Tooltip>
+        </div>
+        <div style={{ fontSize: 12, color: COLORS.mediumGray, marginBottom: 14 }}>Relative trend comparison — lines should track closely</div>
+        <ResponsiveContainer width="100%" height={200}>
+          <LineChart data={indexedChartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke={COLORS.lightGray} />
+            <XAxis dataKey="week" tick={{ fontSize: 11, fill: COLORS.mediumGray, fontFamily: "Lato" }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 11, fill: COLORS.mediumGray, fontFamily: "Lato" }} axisLine={false} tickLine={false} domain={["auto", "auto"]} />
+            <RechartsTooltip contentStyle={{ fontSize: 12, fontFamily: "Lato", border: `1px solid ${COLORS.lightGray}`, borderRadius: 6 }} />
+            <Legend wrapperStyle={{ fontSize: 12, fontFamily: "Lato" }} />
+            <Line type="monotone" dataKey="test" name="Test (indexed)" stroke={COLORS.aubergine} strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="control" name="Control (indexed)" stroke={COLORS.blue} strokeWidth={2} dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* B: DMA Assignment Table */}
+      <div style={cardStyle}>
+        <div style={sectionLabel}>DMA Assignment Table</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ backgroundColor: COLORS.offWhite }}>
+                {[
+                  { col: "dma", label: "DMA" },
+                  { col: "group", label: "Group" },
+                  { col: "tier", label: "Tier" },
+                  { col: "avgWeekly", label: "Avg Weekly Metric" },
+                  { col: "spend", label: "Weekly Spend" },
+                ].map(({ col, label }) => (
+                  <th key={col} onClick={() => toggleSort(col)} style={{
+                    padding: "9px 12px", textAlign: "left", borderBottom: `1px solid ${COLORS.lightGray}`,
+                    fontSize: 11, fontWeight: 700, color: COLORS.mediumGray, textTransform: "uppercase",
+                    letterSpacing: "0.05em", cursor: "pointer", userSelect: "none",
+                    whiteSpace: "nowrap",
+                  }}>
+                    {label} {tableSort.col === col ? (tableSort.dir === "asc" ? "▲" : "▼") : "↕"}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sortedRows.map((row, i) => {
+                const groupColor = row.group === "Control" ? COLORS.mediumGray
+                  : row.group === "High Spend" ? COLORS.aubergineDark : COLORS.aubergine;
+                const groupBg = row.group === "Control" ? COLORS.offWhite
+                  : row.group === "High Spend" ? "#E8D5F5" : "#F6EDF6";
+                return (
+                  <tr key={row.dma + row.group} style={{ backgroundColor: i % 2 === 0 ? COLORS.white : COLORS.offWhite }}>
+                    <td style={{ padding: "8px 12px", borderBottom: `1px solid ${COLORS.lightGray}`, fontFamily: "monospace", fontSize: 12, color: COLORS.darkGray }}>{row.dma}</td>
+                    <td style={{ padding: "8px 12px", borderBottom: `1px solid ${COLORS.lightGray}` }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4, backgroundColor: groupBg, color: groupColor }}>
+                        {row.group}
+                      </span>
+                    </td>
+                    <td style={{ padding: "8px 12px", borderBottom: `1px solid ${COLORS.lightGray}`, color: COLORS.mediumGray }}>T{row.tier}</td>
+                    <td style={{ padding: "8px 12px", borderBottom: `1px solid ${COLORS.lightGray}`, fontFamily: "monospace", fontSize: 12, color: COLORS.darkGray }}>{Math.round(row.avgWeekly).toLocaleString()}</td>
+                    <td style={{ padding: "8px 12px", borderBottom: `1px solid ${COLORS.lightGray}`, fontFamily: "monospace", fontSize: 12, color: row.spend > 0 ? COLORS.darkGray : COLORS.mediumGray }}>
+                      {row.spend > 0 ? `$${Math.round(row.spend).toLocaleString()}` : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 12, color: COLORS.mediumGray }}>
+          {sortedRows.length} markets total · click any column header to sort
+        </div>
       </div>
     </div>
   );
@@ -1405,7 +2088,12 @@ export default function GeoLiftPlanner() {
                   color: COLORS.blue, fontFamily: "'Lato', sans-serif",
                 }}>← Back to Scenario Planner</button>
             </div>
-            <TestDesignOutput params={designParams} />
+            <TestDesignOutput
+              params={designParams}
+              rows={fileData?.rows}
+              mapping={mapping}
+              kpi={kpi}
+            />
           </div>
         )}
       </div>
