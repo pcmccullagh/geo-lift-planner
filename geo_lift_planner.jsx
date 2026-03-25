@@ -1912,9 +1912,308 @@ function TestDesignOutput({ params, rows, mapping, kpi }) {
   );
 }
 
+// ─── Methodology Page ─────────────────────────────────────────────────
+function MethodologyPage({ onBack }) {
+  const sectionStyle = {
+    backgroundColor: COLORS.white,
+    borderRadius: 8,
+    border: `1px solid ${COLORS.lightGray}`,
+    padding: "28px 32px",
+    marginBottom: 24,
+  };
+  const h2Style = {
+    fontSize: 18,
+    fontWeight: 700,
+    color: COLORS.darkGray,
+    marginBottom: 12,
+    marginTop: 0,
+  };
+  const h3Style = {
+    fontSize: 15,
+    fontWeight: 700,
+    color: COLORS.aubergine,
+    marginBottom: 8,
+    marginTop: 20,
+  };
+  const pStyle = {
+    fontSize: 14,
+    color: COLORS.darkGray,
+    lineHeight: 1.65,
+    marginBottom: 12,
+    marginTop: 0,
+  };
+  const pillStyle = (bg, fg) => ({
+    display: "inline-block",
+    backgroundColor: bg,
+    color: fg,
+    borderRadius: 4,
+    padding: "2px 10px",
+    fontSize: 12,
+    fontWeight: 700,
+    marginRight: 8,
+    verticalAlign: "middle",
+  });
+  const tableStyle = {
+    width: "100%",
+    borderCollapse: "collapse",
+    fontSize: 13,
+    marginTop: 12,
+  };
+  const thStyle = {
+    textAlign: "left",
+    padding: "8px 12px",
+    backgroundColor: COLORS.offWhite,
+    borderBottom: `2px solid ${COLORS.lightGray}`,
+    fontWeight: 700,
+    color: COLORS.darkGray,
+  };
+  const tdStyle = {
+    padding: "8px 12px",
+    borderBottom: `1px solid ${COLORS.lightGray}`,
+    color: COLORS.darkGray,
+    verticalAlign: "top",
+  };
+
+  return (
+    <div style={{ maxWidth: 1000, margin: "0 auto", padding: "0 32px 60px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "24px 0 28px" }}>
+        <button onClick={onBack}
+          style={{
+            background: "none", border: "none", cursor: "pointer", fontSize: 13,
+            color: COLORS.blue, fontFamily: "'Lato', sans-serif", padding: 0,
+          }}>← Back</button>
+        <span style={{ color: COLORS.lightGray }}>|</span>
+        <span style={{ fontSize: 20, fontWeight: 700, color: COLORS.darkGray }}>Methodology</span>
+      </div>
+
+      {/* Overview */}
+      <div style={sectionStyle}>
+        <h2 style={h2Style}>What is a Geo-Lift Test?</h2>
+        <p style={pStyle}>
+          A geo-lift test (also called a matched-market experiment) is a controlled experiment that measures the
+          true incremental impact of a marketing campaign by splitting geographic markets into a <strong>test
+          group</strong> (which receives the campaign) and a <strong>control group</strong> (which does not).
+          After the test period, the difference in performance between the two groups — after accounting for
+          organic trends — estimates the campaign's causal effect on your chosen metric.
+        </p>
+        <p style={pStyle}>
+          Unlike attribution models, which rely on statistical correlations and can be confounded by selection
+          bias, a geo-lift test provides near-experimental evidence of causality because the treatment is
+          randomly assigned at the market level.
+        </p>
+      </div>
+
+      {/* Tool Workflow */}
+      <div style={sectionStyle}>
+        <h2 style={h2Style}>How This Tool Works</h2>
+        <p style={pStyle}>
+          The planner guides you through three stages to produce a statistically rigorous, operationally
+          practical test design:
+        </p>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 8 }}>
+          {[
+            {
+              stage: "Stage 1",
+              title: "Upload & Validate Data",
+              bg: COLORS.lightBlueBg,
+              fg: COLORS.blue,
+              body: "You provide historical daily metric data at the DMA level. The tool validates data quality — checking for sufficient history (minimum 8 weeks), missing markets, date continuity, and volume floors. Strong historical data is the foundation of a reliable test design.",
+            },
+            {
+              stage: "Stage 2",
+              title: "Scenario Planning",
+              bg: COLORS.lightYellowBg,
+              fg: "#B07C1A",
+              body: "You specify constraints — budget, number of markets, test duration, and your target minimum detectable effect (MDE). The recommendation engine solves for the optimal design that achieves your statistical power target (default 80%) within your constraints.",
+            },
+            {
+              stage: "Stage 3",
+              title: "Test Design & Market Matching",
+              bg: COLORS.lightGreenBg,
+              fg: COLORS.green,
+              body: "The Monte Carlo matching engine tests 10,000 random combinations of control DMAs and selects the combination that best mirrors the test group's historical behaviour. The output is a deployment-ready market list with match quality metrics and diagnostic charts.",
+            },
+          ].map(({ stage, title, bg, fg, body }) => (
+            <div key={stage} style={{
+              display: "flex", gap: 16, padding: "16px 20px",
+              backgroundColor: bg, borderRadius: 8,
+            }}>
+              <div style={{ minWidth: 90 }}>
+                <span style={pillStyle(fg, COLORS.white)}>{stage}</span>
+              </div>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.darkGray, marginBottom: 4 }}>{title}</div>
+                <p style={{ ...pStyle, marginBottom: 0 }}>{body}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Data Requirements */}
+      <div style={sectionStyle}>
+        <h2 style={h2Style}>Data Requirements</h2>
+        <table style={tableStyle}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Requirement</th>
+              <th style={thStyle}>Minimum</th>
+              <th style={thStyle}>Recommended</th>
+              <th style={thStyle}>Why It Matters</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[
+              ["History length", "8 weeks", "13–26 weeks", "Needed to estimate stable day-of-week and trend patterns for matching"],
+              ["Granularity", "Daily", "Daily", "Weekly data cannot capture day-of-week seasonality, reducing match quality"],
+              ["Geographic unit", "DMA", "DMA", "DMAs are the standard US media planning unit; the tool is calibrated around ~210 US DMAs"],
+              ["Markets", "20 DMAs", "50+ DMAs", "More markets means more candidate control pools and stronger matching options"],
+              ["Metric type", "Any numeric count", "Traffic or conversions", "The KPI affects power calculations; high-variance KPIs (e.g. team creates) require more markets or longer tests"],
+            ].map(([req, min, rec, why], i) => (
+              <tr key={i}>
+                <td style={{ ...tdStyle, fontWeight: 700 }}>{req}</td>
+                <td style={tdStyle}>{min}</td>
+                <td style={tdStyle}>{rec}</td>
+                <td style={tdStyle}>{why}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Statistical Design */}
+      <div style={sectionStyle}>
+        <h2 style={h2Style}>Statistical Design</h2>
+
+        <h3 style={h3Style}>Minimum Detectable Effect (MDE)</h3>
+        <p style={pStyle}>
+          The MDE is the smallest true lift your test is designed to detect. A 10% MDE means: if the
+          campaign genuinely causes a 10% increase in your metric, this test design will detect it
+          (given the chosen power). Smaller MDEs require more statistical power, which means more markets,
+          longer tests, or larger budgets.
+        </p>
+        <p style={pStyle}>
+          <strong>Rule of thumb:</strong> for most brand and acquisition campaigns, a 10–15% MDE is
+          realistic. If your prior campaigns have shown lifts in the 5–8% range, you will need a substantially
+          larger test.
+        </p>
+
+        <h3 style={h3Style}>Statistical Power</h3>
+        <p style={pStyle}>
+          Power is the probability of detecting a real effect when one exists. At 80% power, there is a 1-in-5
+          chance of a false negative — running a campaign that works but getting an inconclusive result.
+          The tool's recommendation engine searches for designs that achieve at least 80% power.
+        </p>
+
+        <h3 style={h3Style}>Significance Level (Alpha)</h3>
+        <p style={pStyle}>
+          Alpha is the false-positive rate — the probability of concluding a campaign worked when it
+          actually didn't. The default is α = 0.10 (10%). Geo tests commonly relax this from the
+          academic standard of 0.05 because the small number of geographic markets makes achieving
+          strict significance thresholds difficult. Using α = 0.10 is a practical trade-off that keeps
+          tests actionable.
+        </p>
+
+        <h3 style={h3Style}>Two-Cell vs. Three-Cell Designs</h3>
+        <p style={pStyle}>
+          A <strong>2-cell design</strong> has one treatment group and one control group. It answers the
+          question: does the campaign produce any lift?
+        </p>
+        <p style={pStyle}>
+          A <strong>3-cell design</strong> adds a second treatment group at a higher spend level. It answers
+          the additional question: does doubling spend produce proportionally more lift, or are there
+          diminishing returns? Three-cell tests require roughly 50% more markets and budget but provide
+          richer insight for budget allocation decisions.
+        </p>
+      </div>
+
+      {/* Monte Carlo Matching */}
+      <div style={sectionStyle}>
+        <h2 style={h2Style}>Monte Carlo Market Matching</h2>
+        <p style={pStyle}>
+          Once test markets are selected, the tool must find the best possible set of control markets.
+          The matching algorithm works as follows:
+        </p>
+        <ol style={{ paddingLeft: 20, margin: "8px 0 12px" }}>
+          {[
+            "Markets are stratified into four tiers based on metric volume (Tier 1 = smallest 25%, Tier 4 = largest 25%). This ensures the control pool represents a similar distribution of market sizes as the test group.",
+            "10,000 random candidate control groups are drawn, with each draw respecting the tier distribution of the test markets.",
+            "Each candidate is scored on three dimensions: correlation of historical trends (weight: 50%), similarity of total metric volume (weight: 20%), and similarity of day-of-week patterns (weight: 30%).",
+            "The candidate with the highest composite score is selected as the control group.",
+          ].map((step, i) => (
+            <li key={i} style={{ fontSize: 14, color: COLORS.darkGray, lineHeight: 1.65, marginBottom: 8 }}>{step}</li>
+          ))}
+        </ol>
+        <p style={pStyle}>
+          This brute-force approach is deliberately simple: it avoids complex optimisation heuristics that can
+          overfit to noise, and the 10,000-sample search space is large enough to find near-optimal solutions
+          for typical US DMA pools.
+        </p>
+      </div>
+
+      {/* Quality Gates */}
+      <div style={sectionStyle}>
+        <h2 style={h2Style}>Interpreting Match Quality</h2>
+        <table style={tableStyle}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Metric</th>
+              <th style={thStyle}>Strong</th>
+              <th style={thStyle}>Acceptable</th>
+              <th style={thStyle}>Concerning</th>
+              <th style={thStyle}>What It Measures</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[
+              ["Correlation", "≥ 0.90", "0.85–0.89", "< 0.85", "Whether test and control trend together historically"],
+              ["Volume similarity", "≤ 5%", "5–15%", "> 15%", "Whether the two groups have similar total metric scale"],
+              ["Day-of-week similarity", "≥ 0.95", "0.90–0.94", "< 0.90", "Whether both groups follow the same weekly seasonality pattern"],
+              ["Composite score", "≥ 0.90", "0.85–0.89", "< 0.85", "Weighted blend of the three metrics above"],
+            ].map(([metric, strong, ok, bad, desc], i) => (
+              <tr key={i}>
+                <td style={{ ...tdStyle, fontWeight: 700 }}>{metric}</td>
+                <td style={{ ...tdStyle, color: COLORS.green, fontWeight: 700 }}>{strong}</td>
+                <td style={{ ...tdStyle, color: "#B07C1A", fontWeight: 700 }}>{ok}</td>
+                <td style={{ ...tdStyle, color: COLORS.red, fontWeight: 700 }}>{bad}</td>
+                <td style={tdStyle}>{desc}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p style={{ ...pStyle, marginTop: 16 }}>
+          <strong>Parallel trends</strong> are the central validity assumption of a geo-lift test: in the
+          absence of the campaign, test and control markets would have followed the same trajectory. The
+          time series charts on the output page let you visually inspect whether this assumption holds
+          historically. If the lines diverge materially in the pre-period, consider resampling or adjusting
+          the DMA selection.
+        </p>
+      </div>
+
+      {/* Limitations */}
+      <div style={sectionStyle}>
+        <h2 style={h2Style}>Limitations & Caveats</h2>
+        <ul style={{ paddingLeft: 20, margin: 0 }}>
+          {[
+            "This tool is designed for US DMA-level analysis. Non-US geographies or non-DMA units (postal codes, states) can be used but may require adjusting market counts and quality thresholds.",
+            "Power calculations use simplified analytical approximations. The Monte Carlo simulation selects the best available match but cannot guarantee a perfect match if the data does not support one.",
+            "Geo tests measure incremental lift during the test period in the test markets. Results may not generalise perfectly to other markets, time periods, or spend levels.",
+            "The tool does not account for spillover (campaign effects leaking into nearby control markets). For campaigns with strong geographic spillover (e.g. national TV), consider using more distant or non-adjacent markets as controls.",
+            "Results are not a substitute for full test-and-control analysis after the campaign runs. This tool designs the experiment; a separate analysis is required to read out results.",
+          ].map((item, i) => (
+            <li key={i} style={{ fontSize: 14, color: COLORS.darkGray, lineHeight: 1.65, marginBottom: 8 }}>{item}</li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ────────────────────────────────────────────────────────
 export default function GeoLiftPlanner() {
   const [stage, setStage] = useState(1);
+  const [showMethodology, setShowMethodology] = useState(false);
   const [fileData, setFileData] = useState(null);
   const [mapping, setMapping] = useState({ dateCol: "", geoCol: "", metricCol: "" });
   const [detected, setDetected] = useState({});
@@ -1957,12 +2256,26 @@ export default function GeoLiftPlanner() {
         <span style={{ fontSize: 22, fontWeight: 900, color: COLORS.white, letterSpacing: "-0.02em" }}>#</span>
         <span style={{ fontSize: 16, fontWeight: 700, color: COLORS.white }}>Geo-Lift Test Planner</span>
         <span style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", marginLeft: 4 }}>
-          {stage === 1 ? "Upload Data" : stage === 2 ? "Scenario Planner" : "Test Design"}
+          {showMethodology ? "Methodology" : stage === 1 ? "Upload Data" : stage === 2 ? "Scenario Planner" : "Test Design"}
         </span>
+        <button
+          onClick={() => setShowMethodology(!showMethodology)}
+          style={{
+            marginLeft: "auto", background: "none", border: `1px solid rgba(255,255,255,0.4)`,
+            borderRadius: 4, cursor: "pointer", fontSize: 13, fontWeight: 600,
+            color: showMethodology ? COLORS.white : "rgba(255,255,255,0.85)",
+            fontFamily: "'Lato', sans-serif", padding: "4px 12px",
+            backgroundColor: showMethodology ? "rgba(255,255,255,0.15)" : "transparent",
+            transition: "background-color 0.15s",
+          }}
+        >
+          Methodology
+        </button>
       </div>
 
       {/* Content */}
-      <div style={{ maxWidth: 1000, margin: "0 auto", padding: "0 32px 60px" }}>
+      {showMethodology && <MethodologyPage onBack={() => setShowMethodology(false)} />}
+      <div style={{ maxWidth: 1000, margin: "0 auto", padding: "0 32px 60px", display: showMethodology ? "none" : undefined }}>
         <Stepper currentStage={stage} />
 
         {/* Stage 1 */}
