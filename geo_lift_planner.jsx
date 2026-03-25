@@ -53,6 +53,7 @@ const TOOLTIPS = {
   threeCellHigh: "The 'high spend' treatment cell receives a multiple of the low spend level (e.g., 2x or 3x). Comparing lift in the high cell vs. the low cell reveals whether incremental spend produces proportional returns.",
   spendMultiplier: "How much more the high-spend cell receives compared to the low-spend cell. A 2x multiplier means if low-spend DMAs get $1,000/week, high-spend DMAs get $2,000/week. Higher multipliers make the dose-response effect easier to detect but cost more.",
   diminishingReturns: "Diminishing returns means each additional dollar of spend produces less incremental lift than the last. If the high-spend cell (2x budget) only produces 1.3x the lift of the low-spend cell, you're seeing diminishing returns — and may want to spread budget across more markets instead of concentrating it.",
+  spendEfficiency: "An optional prior belief about how much lift a given spend level will generate. Enter a reference spend ($/DMA/week) and the lift % you'd expect at that level. The tool scales linearly to your current spend and marks the expected lift on the MDE curve — letting you see whether your budget is likely to generate a detectable effect, not just a measurable one.",
   monteCarlo: "The tool tests 10,000 random combinations of control DMAs and picks the one that best mirrors the test group's historical patterns. This brute-force approach ensures you're not stuck with a mediocre match when a better one exists.",
   preTimeSeries: "These charts show how the test and control groups' metrics moved historically. You want the two lines to track each other closely — that's the 'parallel trends' assumption that makes the test valid.",
   indexedTimeSeries: "Both groups are rebased to 100 at Week 1, so you can compare relative trends regardless of absolute volume differences. If the lines stay close together, the groups have similar growth/decline patterns.",
@@ -588,6 +589,9 @@ function ScenarioPlanner({ validationResults, kpi, onGenerate }) {
   const [testCells, setTestCells] = useState(2);
   const [spendMultiplier, setSpendMultiplier] = useState(2);
   const [hasAppliedRec, setHasAppliedRec] = useState(false);
+  const [useSpendPrior, setUseSpendPrior] = useState(false);
+  const [refSpend, setRefSpend] = useState(500);
+  const [refLift, setRefLift] = useState(10);
 
   const maxDMAs = validationResults?.validDMAs || 50;
 
@@ -680,6 +684,11 @@ function ScenarioPlanner({ validationResults, kpi, onGenerate }) {
   const powerColor = estimatedPower >= 0.8 ? COLORS.green : estimatedPower >= 0.6 ? COLORS.yellow : COLORS.red;
   const powerLabel = estimatedPower >= 0.8 ? "Strong design" : estimatedPower >= 0.6 ? "Moderate — consider adjustments" : "Underpowered — high risk of false negative";
   const powerBgColor = estimatedPower >= 0.8 ? COLORS.lightGreenBg : estimatedPower >= 0.6 ? COLORS.lightYellowBg : COLORS.lightRedBg;
+
+  // Spend efficiency prior — expected lift at current spend, scaled linearly from reference point
+  const expectedLift = (useSpendPrior && refSpend > 0 && refLift > 0 && spendPerDMAWeek > 0)
+    ? Math.min(50, Math.max(0.5, (refLift * spendPerDMAWeek) / refSpend))
+    : null;
 
   // MDE curve data
   const mdeCurveData = [];
@@ -966,6 +975,78 @@ function ScenarioPlanner({ validationResults, kpi, onGenerate }) {
           </div>
         </div>
 
+        {/* Spend Efficiency Prior */}
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <button
+              onClick={() => setUseSpendPrior(!useSpendPrior)}
+              style={{
+                background: "none", border: "none", cursor: "pointer", textAlign: "left",
+                fontSize: 13, color: COLORS.blue, fontFamily: "'Lato', sans-serif", padding: 0,
+              }}
+            >
+              {useSpendPrior ? "▾" : "▸"} Spend efficiency prior <span style={{ fontWeight: 400, color: COLORS.mediumGray }}>(optional)</span>
+            </button>
+            <Tooltip content={TOOLTIPS.spendEfficiency}><span /></Tooltip>
+          </div>
+          {useSpendPrior && (
+            <div style={{
+              marginTop: 10, padding: "16px", borderRadius: 8,
+              border: `1px solid ${COLORS.lightGray}`, backgroundColor: COLORS.offWhite,
+              display: "flex", flexDirection: "column", gap: 12,
+            }}>
+              <p style={{ fontSize: 13, color: COLORS.mediumGray, margin: 0, lineHeight: 1.5 }}>
+                If you have a prior belief about how much lift a given spend level produces for this campaign type, enter it below. The tool will scale it to your current spend and mark the expected effect on the MDE curve.
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 700, color: COLORS.darkGray, display: "block", marginBottom: 4 }}>
+                    Reference spend ($/DMA/week)
+                  </label>
+                  <input
+                    type="number" value={refSpend}
+                    onChange={(e) => setRefSpend(Math.max(1, parseInt(e.target.value) || 1))}
+                    style={{
+                      width: "100%", padding: "7px 10px", borderRadius: 4, fontSize: 13,
+                      border: `1px solid ${COLORS.lightGray}`, fontFamily: "'Lato', sans-serif",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 700, color: COLORS.darkGray, display: "block", marginBottom: 4 }}>
+                    Expected lift at that spend (%)
+                  </label>
+                  <input
+                    type="number" value={refLift} min={0.1} max={100} step={0.5}
+                    onChange={(e) => setRefLift(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
+                    style={{
+                      width: "100%", padding: "7px 10px", borderRadius: 4, fontSize: 13,
+                      border: `1px solid ${COLORS.lightGray}`, fontFamily: "'Lato', sans-serif",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                </div>
+              </div>
+              {expectedLift !== null && (
+                <div style={{
+                  padding: "10px 14px", borderRadius: 6,
+                  backgroundColor: expectedLift >= mde ? COLORS.lightGreenBg : COLORS.lightYellowBg,
+                  border: `1px solid ${expectedLift >= mde ? "#B8E0CC" : "#F0DFA0"}`,
+                  fontSize: 13, color: COLORS.darkGray, lineHeight: 1.5,
+                }}>
+                  At your current spend of <strong>${Math.round(spendPerDMAWeek).toLocaleString()}/DMA/week</strong>,
+                  this implies an expected lift of <strong style={{ color: expectedLift >= mde ? COLORS.green : COLORS.yellow }}>~{expectedLift.toFixed(1)}%</strong>.
+                  {expectedLift >= mde
+                    ? <span style={{ color: COLORS.green }}> Your budget should be sufficient to generate a detectable effect.</span>
+                    : <span style={{ color: "#8a6200" }}> This is below your {mde}% MDE — your budget may not generate enough lift for the test to be conclusive. Consider increasing spend or raising the MDE.</span>
+                  }
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Advanced Settings */}
         <button
           onClick={() => setShowAdvanced(!showAdvanced)}
@@ -1114,6 +1195,24 @@ function ScenarioPlanner({ validationResults, kpi, onGenerate }) {
             <span style={{ color: COLORS.mediumGray }}>Test window</span>
             <span style={{ fontWeight: 700, color: COLORS.darkGray }}>{weeks} weeks</span>
           </div>
+          {expectedLift !== null && (
+            <>
+              <div style={{ height: 1, backgroundColor: COLORS.lightGray }} />
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, alignItems: "center" }}>
+                <span style={{ color: COLORS.mediumGray }}>Expected lift from spend</span>
+                <span style={{
+                  fontWeight: 700,
+                  color: expectedLift >= mde ? COLORS.green : COLORS.yellow,
+                }}>
+                  ~{expectedLift.toFixed(1)}%
+                  {expectedLift >= mde
+                    ? <span style={{ fontWeight: 400, color: COLORS.mediumGray }}> ✓ above MDE</span>
+                    : <span style={{ fontWeight: 400, color: COLORS.yellow }}> ⚠ below MDE</span>
+                  }
+                </span>
+              </div>
+            </>
+          )}
         </div>
 
         {/* MDE Sensitivity Curve */}
@@ -1151,6 +1250,26 @@ function ScenarioPlanner({ validationResults, kpi, onGenerate }) {
                 cy={120 - Math.round(estimatedPower * 100) * 1.1}
                 r="4" fill={COLORS.aubergine}
               />
+              {/* Expected lift marker (spend prior) */}
+              {expectedLift !== null && (() => {
+                const ex = Math.min(50, expectedLift);
+                const xPos = 40 + (ex / 50) * 350;
+                const color = expectedLift >= mde ? COLORS.green : COLORS.yellow;
+                const powerAtExpected = (() => {
+                  const base = Math.sqrt(effectiveDMAs * weeks) * (ex / 100);
+                  return Math.min(0.99, Math.max(0.05, 1 - Math.exp(-base * 1.8)));
+                })();
+                return (
+                  <g>
+                    <line x1={xPos} y1={12} x2={xPos} y2={122}
+                      stroke={color} strokeWidth="1.5" strokeDasharray="4 3" />
+                    <circle cx={xPos} cy={120 - powerAtExpected * 100 * 1.1} r="4" fill={color} />
+                    <text x={xPos} y={9} textAnchor="middle" fill={color} fontSize="8" fontFamily="Lato" fontWeight="700">
+                      ~{ex.toFixed(0)}% expected
+                    </text>
+                  </g>
+                );
+              })()}
               {/* Axes labels */}
               <text x="215" y="138" textAnchor="middle" fill={COLORS.mediumGray} fontSize="9" fontFamily="Lato">MDE %</text>
               <text x="12" y="65" textAnchor="middle" fill={COLORS.mediumGray} fontSize="9" fontFamily="Lato"
